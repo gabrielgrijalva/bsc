@@ -998,6 +998,114 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args TransactionArgs, bl
 	return result.Return(), result.Err
 }
 
+// Custom RPC BundleCall method
+// -----------------------------------------------------------------------------------------------------------------------
+
+type BundleResult struct {
+	Result *core.ExecutionResult
+	Error  error
+}
+
+func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64) ([]BundleResult, error) {
+	defer func(start time.Time) { log.Debug("Executing EVM call bundle finished", "runtime", time.Since(start)) }(time.Now())
+
+	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
+	if state == nil || err != nil {
+		return nil, err
+	}
+	if err := overrides.Apply(state); err != nil {
+		return nil, err
+	}
+
+	results := make([]BundleResult, len(bundle))
+
+	for i, args := range bundle {
+		// Setup context so it may be cancelled when the call has completed
+		// or, in case of unmetered gas, setup a context with a timeout.
+		var cancel context.CancelFunc
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, timeout)
+		} else {
+			ctx, cancel = context.WithCancel(ctx)
+		}
+		// Make sure the context is cancelled when the call has completed
+		// this makes sure resources are cleaned up.
+		defer cancel()
+
+		// Get a new instance of the EVM.
+		msg, err := args.ToMessage(globalGasCap, header.BaseFee)
+		if err != nil {
+			results[i].Error = err
+			continue
+		}
+		evm, vmError, err := b.GetEVM(ctx, msg, state, header, &vm.Config{NoBaseFee: true})
+		if err != nil {
+			results[i].Error = err
+			continue
+		}
+		// Wait for the context to be done and cancel the evm. Even if the
+		// EVM has finished, cancelling may be done (repeatedly)
+		gopool.Submit(func() {
+			<-ctx.Done()
+			evm.Cancel()
+		})
+
+		// Execute the message.
+		gp := new(core.GasPool).AddGas(math.MaxUint64)
+		result, err := core.ApplyMessage(evm, msg, gp)
+		if innerErr := vmError(); innerErr != nil {
+			results[i].Error = innerErr
+			continue
+		}
+
+		// If the timer caused an abort, return an appropriate error message
+		if evm.Cancelled() {
+			results[i].Error = fmt.Errorf("execution aborted (timeout = %v)", timeout)
+			continue
+		}
+		if err != nil {
+			results[i].Error = fmt.Errorf("err: %w (supplied gas %d)", err, msg.Gas())
+			continue
+		}
+		results[i].Result = result
+	}
+
+	return results, nil
+}
+
+type ResultOrError struct {
+	Result hexutil.Bytes
+	Error  error
+}
+
+func (s *PublicBlockChainAPI) CallBundle(ctx context.Context, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride) ([]ResultOrError, error) {
+	bundleResults, err := DoCallBundle(ctx, s.b, bundle, blockNrOrHash, overrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap())
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]ResultOrError, len(bundleResults))
+
+	for i, br := range bundleResults {
+		if br.Error != nil {
+			results[i].Error = br.Error
+			continue
+		}
+
+		// If the result contains a revert reason, try to unpack and return it.
+		if len(br.Result.Revert()) > 0 {
+			results[i].Error = newRevertError(br.Result)
+			continue
+		}
+
+		results[i].Result = br.Result.Return()
+	}
+
+	return results, nil
+}
+
+// -----------------------------------------------------------------------------------------------------------------------
+
 func DoEstimateGas(ctx context.Context, b Backend, args TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, gasCap uint64) (hexutil.Uint64, error) {
 	// Binary search the gas requirement, as it may be higher than the amount used
 	var (
