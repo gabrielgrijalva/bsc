@@ -1001,12 +1001,7 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args TransactionArgs, bl
 // Custom RPC BundleCall method
 // -----------------------------------------------------------------------------------------------------------------------
 
-type BundleResult struct {
-	Result *core.ExecutionResult
-	Error  error
-}
-
-func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64) ([]BundleResult, error) {
+func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64) ([]*core.ExecutionResult, error) {
 	defer func(start time.Time) { log.Debug("Executing EVM call bundle finished", "runtime", time.Since(start)) }(time.Now())
 
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
@@ -1017,7 +1012,7 @@ func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, bloc
 		return nil, err
 	}
 
-	results := make([]BundleResult, len(bundle))
+	results := make([]*core.ExecutionResult, len(bundle))
 
 	for i, args := range bundle {
 		// Setup context so it may be cancelled when the call has completed
@@ -1035,13 +1030,11 @@ func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, bloc
 		// Get a new instance of the EVM.
 		msg, err := args.ToMessage(globalGasCap, header.BaseFee)
 		if err != nil {
-			results[i].Error = err
-			continue
+			return nil, err
 		}
 		evm, vmError, err := b.GetEVM(ctx, msg, state, header, &vm.Config{NoBaseFee: true})
 		if err != nil {
-			results[i].Error = err
-			continue
+			return nil, err
 		}
 		// Wait for the context to be done and cancel the evm. Even if the
 		// EVM has finished, cancelling may be done (repeatedly)
@@ -1053,55 +1046,39 @@ func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, bloc
 		// Execute the message.
 		gp := new(core.GasPool).AddGas(math.MaxUint64)
 		result, err := core.ApplyMessage(evm, msg, gp)
-		if innerErr := vmError(); innerErr != nil {
-			results[i].Error = innerErr
-			continue
+		if err := vmError(); err != nil {
+			return nil, err
 		}
 
 		// If the timer caused an abort, return an appropriate error message
 		if evm.Cancelled() {
-			results[i].Error = fmt.Errorf("execution aborted (timeout = %v)", timeout)
-			continue
+			return nil, fmt.Errorf("execution aborted (timeout = %v)", timeout)
 		}
 		if err != nil {
-			results[i].Error = fmt.Errorf("err: %w (supplied gas %d)", err, msg.Gas())
-			continue
+			return results, fmt.Errorf("err: %w (supplied gas %d)", err, msg.Gas())
 		}
-		results[i].Result = result
+		results[i] = result
 	}
-
 	return results, nil
 }
 
-type ResultOrError struct {
-	Result hexutil.Bytes
-	Error  error
-}
-
-func (s *PublicBlockChainAPI) CallBundle(ctx context.Context, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride) ([]ResultOrError, error) {
-	bundleResults, err := DoCallBundle(ctx, s.b, bundle, blockNrOrHash, overrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap())
+func (s *PublicBlockChainAPI) CallBundle(ctx context.Context, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride) ([]hexutil.Bytes, error) {
+	results, err := DoCallBundle(ctx, s.b, bundle, blockNrOrHash, overrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap())
 	if err != nil {
 		return nil, err
 	}
 
-	results := make([]ResultOrError, len(bundleResults))
+	returnData := make([]hexutil.Bytes, len(results))
 
-	for i, br := range bundleResults {
-		if br.Error != nil {
-			results[i].Error = br.Error
-			continue
-		}
-
+	for i, result := range results {
 		// If the result contains a revert reason, try to unpack and return it.
-		if len(br.Result.Revert()) > 0 {
-			results[i].Error = newRevertError(br.Result)
-			continue
+		if len(result.Revert()) > 0 {
+			return nil, newRevertError(result)
 		}
-
-		results[i].Result = br.Result.Return()
+		returnData[i] = result.Return()
 	}
 
-	return results, nil
+	return returnData, nil
 }
 
 // -----------------------------------------------------------------------------------------------------------------------
