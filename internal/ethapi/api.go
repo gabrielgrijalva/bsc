@@ -1002,8 +1002,6 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args TransactionArgs, bl
 // -----------------------------------------------------------------------------------------------------------------------
 
 func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64) ([]*core.ExecutionResult, error) {
-	defer func(start time.Time) { log.Debug("Executing EVM call bundle finished", "runtime", time.Since(start)) }(time.Now())
-
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
 	if state == nil || err != nil {
 		return nil, err
