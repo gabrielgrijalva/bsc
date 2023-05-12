@@ -1001,7 +1001,7 @@ func (s *PublicBlockChainAPI) Call(ctx context.Context, args TransactionArgs, bl
 // Custom RPC BundleCall method
 // -----------------------------------------------------------------------------------------------------------------------
 
-func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, timeout *uint64, overrides *StateOverride, globalGasCap uint64) ([]*core.ExecutionResult, error) {
+func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride, timeout time.Duration, globalGasCap uint64) ([]*core.ExecutionResult, error) {
 	defer func(start time.Time) { log.Debug("Executing EVM call bundle finished", "runtime", time.Since(start)) }(time.Now())
 
 	state, header, err := b.StateAndHeaderByNumberOrHash(ctx, blockNrOrHash)
@@ -1018,8 +1018,8 @@ func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, bloc
 		// Setup context so it may be cancelled when the call has completed
 		// or, in case of unmetered gas, setup a context with a timeout.
 		var cancel context.CancelFunc
-		if *timeout > 0 {
-			ctx, cancel = context.WithTimeout(ctx, time.Duration(*timeout) * time.Millisecond)
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(ctx, timeout)
 		} else {
 			ctx, cancel = context.WithCancel(ctx)
 		}
@@ -1062,8 +1062,8 @@ func DoCallBundle(ctx context.Context, b Backend, bundle []TransactionArgs, bloc
 	return results, nil
 }
 
-func (s *PublicBlockChainAPI) CallBundle(ctx context.Context, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, timeout *uint64, overrides *StateOverride) ([]hexutil.Bytes, error) {
-	results, err := DoCallBundle(ctx, s.b, bundle, blockNrOrHash, timeout, overrides, s.b.RPCGasCap())
+func (s *PublicBlockChainAPI) CallBundle(ctx context.Context, bundle []TransactionArgs, blockNrOrHash rpc.BlockNumberOrHash, overrides *StateOverride) ([]hexutil.Bytes, error) {
+	results, err := DoCallBundle(ctx, s.b, bundle, blockNrOrHash, overrides, s.b.RPCEVMTimeout(), s.b.RPCGasCap())
 	if err != nil {
 		return nil, err
 	}
